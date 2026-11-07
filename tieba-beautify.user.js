@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         贴吧美化 · 用户与关键词屏蔽
 // @namespace    https://tieba.baidu.com/
-// @version      1.6.1
+// @version      1.7.2
 // @description  屏蔽百度贴吧指定用户/关键词：主题贴直接隐藏，回复折叠提示；支持备注、名单管理、CSV 导入导出、默认最新发帖排序。
 // @author       黑渊玄
 // @match        https://tieba.baidu.com/f*
@@ -30,7 +30,7 @@
    * 6. 设置面板从页面右上角头像旁的「贴吧美化」按钮展开。
    * ========================================================================= */
 
-  const VERSION = '1.6.1';
+  const VERSION = '1.7.2';
   const STORE_KEY = 'tbq.store.v1';
   const MAX_NAME = 40;
   const MAX_REASON = 80;
@@ -509,7 +509,7 @@
     '.tbq-trigger.is-active{background:linear-gradient(135deg,#3f5ee8,#3550d8)!important}',
     '.tbq-trigger svg{display:block;flex:0 0 auto}',
     '.tbq-trigger span{display:inline-block;line-height:1}',
-    '.tbq-trigger--fixed{position:fixed!important;top:62px!important;right:16px!important;margin:0!important;z-index:2147482000!important}',
+    '.tbq-trigger--fixed{position:fixed!important;margin:0!important;z-index:2147482000!important}',
     '.tbq-reason{font:400 12px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif!important;color:#98a2b3!important;margin-left:2px;word-break:break-all}',
     '.tbq-notice{display:flex!important;align-items:center!important;flex-wrap:wrap;gap:8px!important;margin:10px 0 12px!important;padding:7px 12px!important;border:1px dashed #b9c6ff!important;background:#f6f8ff!important;border-radius:8px!important;color:#5b6472!important;font:400 13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif!important;text-align:left!important;box-sizing:border-box!important;box-shadow:none!important}',
     '.tbq-notice__icon{display:inline-flex;align-items:center;color:#7b8ff5;flex:0 0 auto}',
@@ -800,7 +800,8 @@
       post.querySelector('.p_author_name') ||
       post.querySelector('.p_author .j_user_card') ||
       post.querySelector('.p_author a[href*="/home/main"]') ||
-      post.querySelector('.p_author a')
+      post.querySelector('.p_author a') ||
+      post.querySelector('.head-name')
     );
   }
 
@@ -811,7 +812,8 @@
 
     const nameElement =
       kind === 'lzl'
-        ? container.querySelector('.lzl_p_author, .lzl_pull_author a, .lzl_p_author_name')
+        ? (container.querySelector('.lzl_p_author, .lzl_pull_author a, .lzl_p_author_name') ||
+           container.querySelector('.head-name'))
         : getPostAuthorElement(container);
 
     let reasonElement = null;
@@ -898,9 +900,46 @@
     collapsePost(comment, content, blockedUser, 'lzl');
   }
 
+  function processNewThreadItem(item, kind) {
+    if (!item || item.dataset.tbqCollapsed) return;
+
+    const authorElement = item.querySelector('.head-name');
+    if (!authorElement) return;
+    const name = (authorElement.textContent || '').trim();
+    if (!name) return;
+
+    const blockedUser = findBlockedUser([name]);
+    if (!blockedUser) return;
+
+    let content = null;
+    if (kind === 'op') {
+      content = item.querySelector('.pb-content-wrap');
+    } else if (kind === 'lzl') {
+      content = item.querySelector('.comment-content');
+    } else {
+      content = item.querySelector(':scope > .comment-content') || item.querySelector('.comment-content');
+    }
+    if (!content) return;
+
+    collapsePost(item, content, blockedUser, kind === 'lzl' ? 'lzl' : 'post');
+  }
+
+  function scanNewThread() {
+    document.querySelectorAll('.image-text').forEach(function (item) {
+      processNewThreadItem(item, 'op');
+    });
+    document.querySelectorAll('.pb-comment-item').forEach(function (item) {
+      processNewThreadItem(item, 'comment');
+    });
+    document.querySelectorAll('.pb-lzl-item').forEach(function (item) {
+      processNewThreadItem(item, 'lzl');
+    });
+  }
+
   function scanThread() {
     document.querySelectorAll('.l_post, .j_l_post').forEach(processPost);
     document.querySelectorAll('.lzl_single_post').forEach(processComment);
+    scanNewThread();
   }
 
   /* ------------------------------ 扫描和重置 ------------------------------ */
@@ -1204,6 +1243,24 @@
     return '';
   }
 
+  function syncInlineButtonState(button, name) {
+    if (!button || !name) return;
+    button.dataset.name = name;
+    const blocked = userIndex.get(fold(name));
+
+    if (blocked) {
+      button.textContent = '已屏蔽';
+      button.disabled = true;
+      button.classList.add('is-done');
+      button.title = '已在屏蔽名单' + (blocked.reason ? '：' + blocked.reason : '');
+    } else {
+      button.textContent = '屏蔽';
+      button.disabled = false;
+      button.classList.remove('is-done');
+      button.title = '屏蔽 ' + name;
+    }
+  }
+
   function buildInlineBlockButton(name, onClick) {
     const button = document.createElement('button');
     button.type = 'button';
@@ -1220,6 +1277,7 @@
       event.stopPropagation();
       onClick(button);
     });
+    syncInlineButtonState(button, name);
     return button;
   }
 
@@ -1227,6 +1285,11 @@
     const cleanName = toText(name).slice(0, MAX_NAME);
     if (!cleanName) {
       notify('未能识别用户名，请在设置中手动添加', 'err');
+      return;
+    }
+
+    if (userIndex.get(fold(cleanName))) {
+      syncInlineButtonState(button, cleanName);
       return;
     }
 
@@ -1245,9 +1308,7 @@
     }
 
     notify(result.added ? '已屏蔽「' + result.name + '」' : '已更新「' + result.name + '」的屏蔽原因');
-    button.textContent = '已屏蔽';
-    button.disabled = true;
-    button.classList.add('is-done');
+    syncInlineButtonState(button, result.name);
   }
 
   function scanHeadNameButtons() {
@@ -1262,13 +1323,7 @@
 
       const existing = info.querySelector('.tbq-inline-block');
       if (existing) {
-        if (existing.dataset.name !== name) {
-          existing.dataset.name = name;
-          existing.textContent = '屏蔽';
-          existing.title = '屏蔽 ' + name;
-          existing.disabled = false;
-          existing.classList.remove('is-done');
-        }
+        syncInlineButtonState(existing, name);
         return;
       }
 
@@ -1288,7 +1343,13 @@
       if (!name || name.length > 40) return;
 
       const row = anchor.parentElement;
-      if (!row || row.querySelector('.tbq-inline-block')) return;
+      if (!row) return;
+
+      const existing = row.querySelector('.tbq-inline-block');
+      if (existing) {
+        syncInlineButtonState(existing, name);
+        return;
+      }
 
       const button = buildInlineBlockButton(name, function (clicked) {
         const current = (anchor.textContent || '').trim() || clicked.dataset.name;
@@ -1313,13 +1374,7 @@
 
     let button = inlineButtons.get(levelElement);
     if (button && button.isConnected) {
-      if (button.dataset.name !== name) {
-        button.dataset.name = name;
-        button.textContent = '屏蔽';
-        button.title = '屏蔽 ' + name;
-        button.disabled = false;
-        button.classList.remove('is-done');
-      }
+      syncInlineButtonState(button, name);
       return;
     }
 
@@ -1339,6 +1394,7 @@
       blockUserInline(levelElement, button);
     });
 
+    syncInlineButtonState(button, name);
     levelElement.insertAdjacentElement('afterend', button);
     inlineButtons.set(levelElement, button);
   }
@@ -1347,6 +1403,11 @@
     const name = resolveNameForLevel(levelElement) || button.dataset.name;
     if (!name) {
       notify('未能识别用户名，请在设置中手动添加', 'err');
+      return;
+    }
+
+    if (userIndex.get(fold(name))) {
+      syncInlineButtonState(button, name);
       return;
     }
 
@@ -1365,9 +1426,7 @@
     }
 
     notify(result.added ? '已屏蔽「' + result.name + '」' : '已更新「' + result.name + '」的屏蔽原因');
-    button.textContent = '已屏蔽';
-    button.disabled = true;
-    button.classList.add('is-done');
+    syncInlineButtonState(button, result.name);
   }
 
   function scanInlineButtons() {
@@ -1643,6 +1702,7 @@
   let panelRoot = null;
   let panelOpen = false;
   let triggerEl = null;
+  let triggerPositioned = false;
   let ui = null;
   let toastTimer = 0;
 
@@ -1663,17 +1723,22 @@
     triggerEl = button;
     if (document.body) document.body.appendChild(button);
     button.classList.add('tbq-trigger--fixed');
+    window.requestAnimationFrame(function () { positionTrigger(false); });
   }
 
   function findAvatarIn(scope) {
     if (!scope) return null;
+    const postSelector = '.pb-comment-item, .pb-lzl-item, .image-text, .thread-card, .l_post, .lzl_single_post, .post-item';
     const direct = scope.querySelector('.u_avatar, a.u_avatar, img.user_head');
-    if (direct) return direct;
+    if (direct && !direct.closest(postSelector)) return direct;
+
     const links = scope.querySelectorAll('a[href*="home/main"]');
     for (const link of links) {
+      if (link.closest(postSelector)) continue;
       if (link.querySelector('img')) return link;
     }
     for (const link of links) {
+      if (link.closest(postSelector)) continue;
       const text = (link.textContent || '').trim();
       const rect = link.getBoundingClientRect();
       if (text && text.length <= 12 && rect.top < 160 && rect.width > 0) return link;
@@ -1690,33 +1755,55 @@
       if (hit) return hit;
     }
     // 没有匹配到头部容器时，只在页面顶部区域寻找头像，避免误伤帖子里的作者头像
+    const postSelector = '.pb-comment-item, .pb-lzl-item, .image-text, .thread-card, .l_post, .lzl_single_post, .post-item';
     const links = document.querySelectorAll('a[href*="home/main"]');
     for (const link of links) {
+      if (link.closest(postSelector)) continue;
       const rect = link.getBoundingClientRect();
-      if (rect.top < 130 && rect.width > 0 && link.querySelector('img')) return link;
+      if (rect.top < 100 && rect.width > 0 && link.querySelector('img')) return link;
     }
     return null;
+  }
+
+  function positionTrigger(force) {
+    if (!triggerEl) return;
+    if (triggerPositioned && !force) return;
+
+    const avatar = findAvatar();
+    const rect = avatar ? avatar.getBoundingClientRect() : null;
+    const width = triggerEl.offsetWidth || 96;
+    const height = triggerEl.offsetHeight || 26;
+
+    triggerEl.style.position = 'fixed';
+
+    if (!rect || rect.width < 8 || rect.height < 8 || rect.top < -40 || rect.top > 160) {
+      triggerEl.style.left = 'auto';
+      triggerEl.style.right = '16px';
+      triggerEl.style.top = '64px';
+      return;
+    }
+
+    let left = rect.right + 8;
+    if (left + width > window.innerWidth - 8) {
+      left = rect.left - width - 8;
+    }
+    left = Math.max(8, Math.min(left, window.innerWidth - width - 8));
+    const top = Math.max(8, Math.min(rect.top + (rect.height - height) / 2, window.innerHeight - height - 8));
+
+    triggerEl.style.left = Math.round(left) + 'px';
+    triggerEl.style.top = Math.round(top) + 'px';
+    triggerEl.style.right = 'auto';
+    triggerPositioned = true;
   }
 
   function placeTrigger() {
     if (!triggerEl || !document.body) return;
     if (!triggerEl.isConnected) {
       document.body.appendChild(triggerEl);
-      triggerEl.classList.add('tbq-trigger--fixed');
-    }
-    const avatar = findAvatar();
-    if (avatar) {
-      const anchor = avatar.closest('a') || avatar;
-      if (anchor && anchor.parentNode && !anchor.contains(triggerEl)) {
-        if (triggerEl.previousElementSibling !== anchor) {
-          anchor.insertAdjacentElement('afterend', triggerEl);
-        }
-        triggerEl.classList.remove('tbq-trigger--fixed');
-        if (panelOpen) positionPanel();
-        return;
-      }
     }
     triggerEl.classList.add('tbq-trigger--fixed');
+    positionTrigger(false);
+    if (panelOpen) positionPanel();
   }
 
   function createPanel() {
@@ -2308,8 +2395,13 @@
     observePage();
 
     window.addEventListener('resize', function () {
+      positionTrigger(true);
       if (panelOpen) positionPanel();
     });
+
+    window.addEventListener('scroll', function () {
+      if (!triggerPositioned) positionTrigger(false);
+    }, { passive: true });
 
     document.addEventListener('click', onNoticeClick, true);
     document.addEventListener('mouseover', rememberHoveredName, true);
